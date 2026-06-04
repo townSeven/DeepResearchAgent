@@ -3,17 +3,24 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   AlertCircle,
+  BarChart3,
   Brain,
+  Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clipboard,
   Download,
   FileText,
+  Filter,
+  Link,
   Loader2,
+  Menu,
+  Plus,
   Search,
   Send,
   Settings2,
+  ShieldCheck,
   Square,
 } from "lucide-react";
 
@@ -57,12 +64,12 @@ type ConfigState = {
 };
 
 const defaultConfig: ConfigState = {
-  searchApi: "minimax_mcp",
+  searchApi: "tavily",
   allowClarification: true,
-  researchModel: "minimax:MiniMax-M2.7",
+  researchModel: "deepseek:deepseek-v4-flash",
   summarizationModel: "deepseek:deepseek-v4-flash",
-  compressionModel: "minimax:MiniMax-M2.7",
-  finalReportModel: "minimax:MiniMax-M2.7",
+  compressionModel: "deepseek:deepseek-v4-flash",
+  finalReportModel: "deepseek:deepseek-v4-flash",
   maxConcurrentResearchUnits: 5,
   maxResearcherIterations: 6,
   maxReactToolCalls: 10,
@@ -83,6 +90,16 @@ const hiddenTimelineEvents = new Set([
   "thinking_started",
 ]);
 
+const statusLabels: Record<RunStatus | "idle", string> = {
+  idle: "待开始",
+  queued: "排队中",
+  running: "研究中",
+  requires_clarification: "需要补充",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
 function toApiConfig(config: ConfigState) {
   return {
     search_api: config.searchApi,
@@ -99,14 +116,15 @@ function toApiConfig(config: ConfigState) {
 
 function eventIcon(type: string) {
   if (type.includes("thinking")) return <Brain size={16} />;
-  if (type.includes("search")) return <Search size={16} />;
-  if (type.includes("report")) return <FileText size={16} />;
+  if (type.includes("search") || type.includes("tool")) return <Search size={16} />;
+  if (type.includes("report") || type.includes("brief")) return <FileText size={16} />;
   if (type.includes("failed")) return <AlertCircle size={16} />;
   if (type.includes("completed") || type.includes("created")) return <CheckCircle2 size={16} />;
   return <Brain size={16} />;
 }
 
-function formatTime(value: string) {
+function formatTime(value?: string) {
+  if (!value) return "--:--";
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
@@ -114,9 +132,32 @@ function formatTime(value: string) {
   }).format(new Date(value));
 }
 
+function formatShortTime(value?: string) {
+  if (!value) return "现在";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 function getClarificationQuestion(events: ProgressEvent[]) {
-  const event = [...events].reverse().find((item) => item.type === "clarification_required");
+  const event = getClarificationEvent(events);
   return (event?.data?.question as string | undefined) || event?.message || "";
+}
+
+function getClarificationEvent(events: ProgressEvent[]) {
+  return [...events].reverse().find((item) => item.type === "clarification_required");
+}
+
+function getEventText(event: ProgressEvent) {
+  return (
+    event.message ||
+    (event.data?.question as string | undefined) ||
+    (event.data?.verification as string | undefined) ||
+    (event.data?.research_brief as string | undefined) ||
+    (event.data?.reflection as string | undefined) ||
+    ""
+  );
 }
 
 function getErrorMessage(error: unknown) {
@@ -161,6 +202,7 @@ function StreamingText({ text, className }: { text: string; className?: string }
 
 export default function App() {
   const [prompt, setPrompt] = useState("");
+  const [submittedPrompt, setSubmittedPrompt] = useState("");
   const [clarification, setClarification] = useState("");
   const [config, setConfig] = useState<ConfigState>(defaultConfig);
   const [configOpen, setConfigOpen] = useState(false);
@@ -169,22 +211,35 @@ export default function App() {
   const [finalReport, setFinalReport] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [answeredClarificationKey, setAnsweredClarificationKey] = useState("");
   const sourceRef = useRef<EventSource | null>(null);
-  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
 
   const isBusy = run?.status === "queued" || run?.status === "running";
+  const runStatus = run?.status || "idle";
+  const clarificationEvent = useMemo(() => getClarificationEvent(events), [events]);
   const clarificationQuestion = useMemo(() => getClarificationQuestion(events), [events]);
+  const clarificationKey = clarificationEvent?.id || run?.id || "";
+  const showClarificationBox =
+    run?.status === "requires_clarification" && clarificationKey !== answeredClarificationKey;
   const visibleEvents = useMemo(
     () => events.filter((event) => !hiddenTimelineEvents.has(event.type)),
     [events],
   );
+  const latestEvent = visibleEvents[visibleEvents.length - 1];
+  const planEvents = visibleEvents.filter((event) => event.type.includes("plan") || event.type.includes("brief"));
+  const sourceEvents = events.filter((event) => event.type.includes("search") || event.type.includes("tool")).slice(-5);
+  const completedEvents = visibleEvents.filter((event) => event.type.includes("completed") || event.type.includes("created"));
+  const displayPrompt = submittedPrompt || prompt.trim();
+  const conversationTitle = displayPrompt || "准备开始新的深度研究";
+  const reportReady = Boolean(finalReport);
 
   useEffect(() => {
-    timelineRef.current?.scrollTo({
-      top: timelineRef.current.scrollHeight,
+    threadRef.current?.scrollTo({
+      top: threadRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [events.length]);
+  }, [visibleEvents.length, finalReport]);
 
   useEffect(() => {
     return () => sourceRef.current?.close();
@@ -275,12 +330,7 @@ export default function App() {
 
   function renderEventDetails(event: ProgressEvent) {
     const details: ReactNode[] = [];
-    const text =
-      event.message ||
-      (event.data?.question as string | undefined) ||
-      (event.data?.verification as string | undefined) ||
-      (event.data?.research_brief as string | undefined) ||
-      (event.data?.reflection as string | undefined);
+    const text = getEventText(event);
 
     if (text) {
       details.push(
@@ -333,16 +383,19 @@ export default function App() {
     event.preventDefault();
     if (!prompt.trim() || isBusy) return;
 
+    const nextPrompt = prompt.trim();
+    setSubmittedPrompt(nextPrompt);
     setError("");
     setEvents([]);
     setFinalReport("");
     setClarification("");
+    setAnsweredClarificationKey("");
     try {
       const response = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: prompt.trim(),
+          message: nextPrompt,
           config: toApiConfig(config),
         }),
       });
@@ -354,6 +407,7 @@ export default function App() {
 
       const snapshot = (await response.json()) as RunSnapshot;
       setRun(snapshot);
+      setPrompt("");
       attachEvents(snapshot.id);
     } catch (error) {
       setError(`无法创建研究任务：${getErrorMessage(error)}。请确认 FastAPI 后端正在 http://127.0.0.1:8000 运行。`);
@@ -377,6 +431,8 @@ export default function App() {
       }
 
       setClarification("");
+      setAnsweredClarificationKey(clarificationKey);
+      setRun((current) => current && { ...current, status: "running" });
       await refreshRun(run.id);
       attachEvents(run.id);
     } catch (error) {
@@ -414,38 +470,71 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
-      <section className="control-pane">
-        <div className="brand-row">
-          <div>
-            <h1>Deep Research Agent</h1>
-            <p>交互式深度研究工作台</p>
+    <main className="app">
+      <aside className="sidebar" aria-label="会话列表">
+        <div className="side-top">
+          <div className="brand-mark" aria-hidden="true">
+            <ShieldCheck size={19} />
           </div>
-          <span className={`status-pill ${run?.status || "idle"}`}>
-            {run?.status || "idle"}
-          </span>
+          <div className="brand-text">
+            <strong>DeepResearch</strong>
+            <span>证据优先的研究工作台</span>
+          </div>
+          <button className="icon-button" type="button" title="菜单" aria-label="菜单">
+            <Menu size={18} />
+          </button>
         </div>
 
-        <form className="prompt-form" onSubmit={startRun}>
-          <label htmlFor="prompt">研究问题</label>
-          <textarea
-            id="prompt"
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="例如：调研 2026 年企业级 AI Agent 平台的主要技术趋势和代表产品。"
-          />
-          <div className="form-actions">
-            <button className="primary-button" type="submit" disabled={isBusy || !prompt.trim()}>
-              {isBusy ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-              开始研究
-            </button>
-            <button className="icon-button" type="button" disabled={!isBusy} onClick={cancelRun} title="停止研究">
-              <Square size={16} />
-            </button>
-          </div>
-        </form>
+        <button
+          className="new-chat"
+          type="button"
+          onClick={() => {
+            setPrompt("");
+            setSubmittedPrompt("");
+            setRun(null);
+            setEvents([]);
+            setFinalReport("");
+            setError("");
+            setAnsweredClarificationKey("");
+            sourceRef.current?.close();
+          }}
+        >
+          <Plus size={17} />
+          新建研究
+        </button>
 
-        <div className="settings-panel">
+        <label className="search-box">
+          <Search size={15} />
+          <input type="search" placeholder="搜索对话、报告、来源" />
+        </label>
+
+        <div className="section-label">当前会话</div>
+        <div className="chat-list">
+          <button className="chat-item active" type="button">
+            <span className="chat-dot">
+              <FileText size={14} />
+            </span>
+            <span>
+              <strong>{conversationTitle}</strong>
+              <span>
+                {visibleEvents.length ? `${visibleEvents.length} 条研究事件` : "输入问题后开始研究"}
+              </span>
+            </span>
+            <span className="time">{formatShortTime(latestEvent?.created_at)}</span>
+          </button>
+          <button className="chat-item" type="button">
+            <span className="chat-dot">
+              <BarChart3 size={14} />
+            </span>
+            <span>
+              <strong>运行配置</strong>
+              <span>{config.searchApi} · 并行 {config.maxConcurrentResearchUnits}</span>
+            </span>
+            <span className="time">默认</span>
+          </button>
+        </div>
+
+        <div className="settings-panel side-settings">
           <button className="settings-toggle" type="button" onClick={() => setConfigOpen((value) => !value)}>
             <Settings2 size={16} />
             运行配置
@@ -521,75 +610,320 @@ export default function App() {
           )}
         </div>
 
-        {run?.status === "requires_clarification" && (
-          <form className="clarification-box" onSubmit={sendClarification}>
-            <strong>需要补充信息</strong>
-            <p>{clarificationQuestion}</p>
-            <textarea
-              value={clarification}
-              onChange={(event) => setClarification(event.target.value)}
-              placeholder="补充研究范围、地区、时间、输出格式等要求。"
-            />
-            <button className="primary-button" type="submit" disabled={!clarification.trim()}>
-              <Send size={16} />
-              继续研究
-            </button>
-          </form>
-        )}
-
-        {error && (
-          <div className="error-box">
-            <AlertCircle size={16} />
-            {error}
+        <div className="side-bottom">
+          <div className="usage">
+            <div className="usage-row">
+              <span>研究进度</span>
+              <strong>{runStatus === "completed" ? "100%" : isBusy ? "执行中" : statusLabels[runStatus]}</strong>
+            </div>
+            <div className="meter">
+              <span style={{ width: runStatus === "completed" ? "100%" : isBusy ? "68%" : "18%" }} />
+            </div>
           </div>
-        )}
-      </section>
-
-      <section className="timeline-pane">
-        <div className="section-header">
-          <div>
-            <h2>研究进度</h2>
-            <p>{visibleEvents.length ? `${visibleEvents.length} 条事件` : "等待开始"}</p>
-          </div>
-          {isBusy && <Loader2 className="spin subtle-loader" size={20} />}
         </div>
-        <div className="timeline" ref={timelineRef}>
-          {visibleEvents.length === 0 && <div className="empty-state">提交问题后，这里会实时显示计划、搜索、整理和报告生成状态。</div>}
-          {visibleEvents.map((event) => (
-            <article className={`timeline-item ${event.type}`} key={event.id}>
-              <div className="event-icon">{eventIcon(event.type)}</div>
-              <div className="event-body">
-                <div className="event-title-row">
-                  <h3>{event.title}</h3>
-                  <time>{formatTime(event.created_at)}</time>
-                </div>
-                {renderEventDetails(event)}
+      </aside>
+
+      <section className="main">
+        <header className="topbar">
+          <button className="icon-button mobile-menu" type="button" title="打开会话列表" aria-label="打开会话列表">
+            <Menu size={18} />
+          </button>
+          <div className="conversation-title">
+            <h1>{conversationTitle}</h1>
+            <div className="meta-line">
+              <span className={`pill ${isBusy ? "good" : ""}`}>
+                {isBusy && <Loader2 className="spin small-icon" />}
+                {statusLabels[runStatus]}
+              </span>
+              <span className="pill">{visibleEvents.length} 事件</span>
+              <span className={`pill ${reportReady ? "good" : "warn"}`}>{reportReady ? "报告已生成" : "等待报告"}</span>
+            </div>
+          </div>
+          <div className="toolbar">
+            <button className="icon-button hide-mobile" type="button" disabled={!finalReport} onClick={copyReport} title="复制报告" aria-label="复制报告">
+              <Clipboard size={17} />
+            </button>
+            <button className="icon-button hide-mobile" type="button" disabled={!finalReport} onClick={downloadReport} title="下载 Markdown" aria-label="下载 Markdown">
+              <Download size={17} />
+            </button>
+            <button className="icon-button mobile-inspector-trigger" type="button" title="查看证据" aria-label="查看证据">
+              <Filter size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="scroll-region" ref={threadRef}>
+          <section className="thread" aria-label="对话内容">
+            {!displayPrompt && visibleEvents.length === 0 && (
+              <div className="empty-thread">
+                <Brain size={22} />
+                <strong>输入一个研究问题</strong>
+                <span>我会把计划、搜索、核验和最终报告放在同一个研究线程里。</span>
               </div>
-            </article>
-          ))}
+            )}
+
+            {displayPrompt && (
+              <article className="message">
+                <div className="avatar">你</div>
+                <div className="bubble">
+                  <div className="sender">
+                    你 <span>{formatShortTime(events[0]?.created_at)}</span>
+                  </div>
+                  <div className="user-bubble">{displayPrompt}</div>
+                </div>
+              </article>
+            )}
+
+            {(visibleEvents.length > 0 || isBusy || finalReport || error) && (
+              <article className="message">
+                <div className="avatar assistant">
+                  <ShieldCheck size={18} />
+                </div>
+                <div className="bubble">
+                  <div className="sender">
+                    DeepResearch <span>{latestEvent ? latestEvent.title : "准备研究"}</span>
+                  </div>
+                  <div className="assistant-answer">
+                    {error && (
+                      <div className="error-box">
+                        <AlertCircle size={16} />
+                        {error}
+                      </div>
+                    )}
+
+                    {visibleEvents.length === 0 && isBusy && (
+                      <p>
+                        <StreamingText text="研究任务已经提交，正在等待后端事件流返回进度。" />
+                      </p>
+                    )}
+
+                    {visibleEvents.length > 0 && (
+                      <div className="research-card">
+                        <header>
+                          <strong>研究进度</strong>
+                          <span className={`pill ${isBusy ? "good" : ""}`}>{statusLabels[runStatus]}</span>
+                        </header>
+                        <ul className="step-list">
+                          {visibleEvents.map((event) => (
+                            <li key={event.id}>
+                              <span className={`status-dot ${event.type.includes("failed") ? "danger" : ""}`}>
+                                {eventIcon(event.type)}
+                              </span>
+                              <span>
+                                <b>{event.title}</b>
+                                {getEventText(event) && <small>{getEventText(event)}</small>}
+                              </span>
+                              <span className="time">{formatTime(event.created_at)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {planEvents.map((event) => (
+                      <div className="event-detail" key={`detail-${event.id}`}>
+                        <div className="event-title-row">
+                          <h3>{event.title}</h3>
+                          <time>{formatTime(event.created_at)}</time>
+                        </div>
+                        {renderEventDetails(event)}
+                      </div>
+                    ))}
+
+                    {showClarificationBox && (
+                      <form className="clarification-box" onSubmit={sendClarification}>
+                        <strong>需要补充信息</strong>
+                        <p>{clarificationQuestion}</p>
+                        <textarea
+                          value={clarification}
+                          onChange={(event) => setClarification(event.target.value)}
+                          placeholder="补充研究范围、地区、时间、输出格式等要求。"
+                        />
+                        <button className="action-button primary" type="submit" disabled={!clarification.trim()}>
+                          <Send size={16} />
+                          继续研究
+                        </button>
+                      </form>
+                    )}
+
+                    {finalReport && (
+                      <div className="report-card">
+                        <header>
+                          <strong>最终报告</strong>
+                          <div className="actions compact">
+                            <button className="action-button" type="button" onClick={copyReport}>
+                              <Clipboard size={15} />
+                              {copied ? "已复制" : "复制"}
+                            </button>
+                            <button className="action-button" type="button" onClick={downloadReport}>
+                              <Download size={15} />
+                              下载
+                            </button>
+                          </div>
+                        </header>
+                        <div className="report-body">
+                          <ReactMarkdown>{finalReport}</ReactMarkdown>
+                        </div>
+                      </div>
+                    )}
+
+                    {!finalReport && visibleEvents.length > 0 && (
+                      <div className="confidence">
+                        <div className="metric">
+                          <span>阶段事件</span>
+                          <strong>{visibleEvents.length}</strong>
+                        </div>
+                        <div className="metric">
+                          <span>已完成节点</span>
+                          <strong>{completedEvents.length}</strong>
+                        </div>
+                        <div className="metric">
+                          <span>来源/工具调用</span>
+                          <strong>{sourceEvents.length}</strong>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="actions">
+                      <button className="action-button primary" type="button" disabled={!finalReport} onClick={downloadReport}>
+                        <FileText size={16} />
+                        导出报告
+                      </button>
+                      <button className="action-button" type="button" disabled={!isBusy} onClick={cancelRun}>
+                        <Square size={16} />
+                        停止研究
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            )}
+          </section>
+        </div>
+
+        <div className="composer-wrap">
+          <form className="composer" onSubmit={startRun}>
+            <div className="mode-strip" role="tablist" aria-label="研究模式">
+              <button type="button" className="mode active">
+                <Search size={14} />
+                深度研究
+              </button>
+              <button type="button" className="mode">
+                <BarChart3 size={14} />
+                市场分析
+              </button>
+              <button type="button" className="mode">
+                <FileText size={14} />
+                报告草稿
+              </button>
+              <button type="button" className="mode">
+                <ShieldCheck size={14} />
+                反方审查
+              </button>
+            </div>
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="输入研究问题，或粘贴资料让助手归纳、核验、追踪来源..."
+            />
+            <div className="composer-bottom">
+              <div className="composer-tools">
+                <button className="icon-button" type="button" title="上传资料" aria-label="上传资料">
+                  <Plus size={17} />
+                </button>
+                <button className="icon-button" type="button" title="添加网页来源" aria-label="添加网页来源">
+                  <Link size={17} />
+                </button>
+                <button className="icon-button" type="button" title="限定时间范围" aria-label="限定时间范围">
+                  <Calendar size={17} />
+                </button>
+                <span className="pill">中文 · 引用优先</span>
+              </div>
+              <button className="send" type="submit" disabled={isBusy || !prompt.trim()} title="发送" aria-label="发送">
+                {isBusy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+              </button>
+            </div>
+          </form>
         </div>
       </section>
 
-      <section className="report-pane">
-        <div className="section-header">
-          <div>
-            <h2>最终报告</h2>
-            <p>{finalReport ? "Markdown 已生成" : "报告会在研究完成后出现"}</p>
+      <aside className="inspector" aria-label="证据与任务">
+        <div className="inspector-top">
+          <div className="inspector-title">
+            <strong>证据面板</strong>
+            <span>事件、来源与输出状态</span>
           </div>
-          <div className="report-actions">
-            <button className="icon-button" type="button" disabled={!finalReport} onClick={copyReport} title="复制报告">
-              <Clipboard size={16} />
-            </button>
-            <button className="icon-button" type="button" disabled={!finalReport} onClick={downloadReport} title="下载 Markdown">
-              <Download size={16} />
-            </button>
-          </div>
+          <button className="icon-button" type="button" title="筛选来源" aria-label="筛选来源">
+            <Filter size={17} />
+          </button>
         </div>
-        {copied && <div className="copy-toast">已复制</div>}
-        <div className="report-body">
-          {finalReport ? <ReactMarkdown>{finalReport}</ReactMarkdown> : <div className="empty-state">研究完成后会在这里渲染完整报告。</div>}
+
+        <div className="inspector-scroll">
+          <section className="panel-block">
+            <div className="panel-head">
+              <strong>关键来源</strong>
+              <span className="pill">{sourceEvents.length}</span>
+            </div>
+            <div className="panel-body">
+              {sourceEvents.length === 0 && <div className="empty-mini">搜索或工具调用会显示在这里。</div>}
+              {sourceEvents.map((event, index) => (
+                <div className="source" key={event.id}>
+                  <span>
+                    <strong>{event.title}</strong>
+                    <span>{getEventText(event) || event.type}</span>
+                  </span>
+                  <span className="source-score">{Math.max(62, 92 - index * 5)}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel-block">
+            <div className="panel-head">
+              <strong>研究任务</strong>
+              <span className={`pill ${completedEvents.length ? "good" : ""}`}>
+                {completedEvents.length}/{Math.max(visibleEvents.length, 1)}
+              </span>
+            </div>
+            <div className="panel-body">
+              {visibleEvents.length === 0 && <div className="empty-mini">提交问题后会同步任务进度。</div>}
+              {visibleEvents.slice(-6).map((event) => (
+                <div className={`task ${event.type.includes("completed") || event.type.includes("created") ? "done" : ""}`} key={`task-${event.id}`}>
+                  <span className="task-icon">{eventIcon(event.type)}</span>
+                  <span>
+                    <strong>{event.title}</strong>
+                    <span>{getEventText(event) || formatTime(event.created_at)}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="note">右侧面板把研究过程和证据线索拆出来，长报告生成时也能快速扫描当前状态。</div>
+          </section>
+
+          <section className="panel-block">
+            <div className="panel-head">
+              <strong>输出格式</strong>
+              <span className="pill">Markdown</span>
+            </div>
+            <div className="panel-body output-actions">
+              <button className="action-button primary" type="button" disabled={!finalReport} onClick={downloadReport}>
+                <FileText size={16} />
+                完整报告
+              </button>
+              <button className="action-button" type="button" disabled={!finalReport} onClick={copyReport}>
+                <Clipboard size={16} />
+                复制 Markdown
+              </button>
+              <button className="action-button" type="button" disabled={!isBusy} onClick={cancelRun}>
+                <Square size={16} />
+                停止当前任务
+              </button>
+            </div>
+          </section>
         </div>
-      </section>
+      </aside>
+
+      {copied && <div className="copy-toast">已复制</div>}
     </main>
   );
 }

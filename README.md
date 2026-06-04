@@ -69,13 +69,13 @@ API Docs: http://127.0.0.1:2024/docs
 
 ## Web UI
 
-如果项目中包含 `web/` 前端和 FastAPI 后端，可以分别启动：
+启动 FastAPI 后端：
 
 ```bash
 uv run uvicorn deep_research_agent.server:app --reload --port 8000
 ```
 
-另开一个终端：
+启动前端：
 
 ```bash
 cd web
