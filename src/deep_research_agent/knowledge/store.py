@@ -5,7 +5,11 @@ from pathlib import Path
 
 import chromadb
 
-from deep_research_agent.knowledge.models import PaperChunk, PaperSearchResult
+from deep_research_agent.knowledge.models import (
+    PaperChunk,
+    PaperInfo,
+    PaperSearchResult,
+)
 
 
 class PaperVectorStore:
@@ -65,6 +69,21 @@ class PaperVectorStore:
     async def count(self) -> int:
         """Return the number of stored chunks."""
         return await asyncio.to_thread(self.collection.count)
+
+    async def list_papers(self) -> list[PaperInfo]:
+        """Aggregate stored chunks into paper summaries."""
+        response = await asyncio.to_thread(self.collection.get, include=["metadatas"])
+        papers: dict[str, PaperInfo] = {}
+        for metadata in response["metadatas"] or []:
+            document_id = metadata["document_id"]
+            if document_id not in papers:
+                papers[document_id] = PaperInfo(
+                    document_id=document_id,
+                    file_name=metadata["file_name"],
+                    chunk_count=0,
+                )
+            papers[document_id].chunk_count += 1
+        return sorted(papers.values(), key=lambda paper: paper.file_name.lower())
 
     async def search(
         self,

@@ -19,3 +19,34 @@ class PaperSearchResult(PaperChunk):
     """A private paper chunk returned by vector search."""
 
     score: float
+
+
+class PaperUpload(BaseModel):
+    """A private paper file submitted for ingestion."""
+
+    file_name: str
+    content_type: str
+    data: bytes
+
+
+class PaperInfo(BaseModel):
+    """A stored private paper summary."""
+
+    document_id: str
+    file_name: str
+    chunk_count: int
+
+
+class PaperIngestionFailure(BaseModel):
+    """A private paper that could not be ingested."""
+
+    file_name: str
+    error: str
+
+
+class PaperIngestionSummary(BaseModel):
+    """Per-file results from one ingestion batch."""
+
+    ingested: list[PaperInfo] = []
+    skipped: list[PaperInfo] = []
+    failed: list[PaperIngestionFailure] = []
