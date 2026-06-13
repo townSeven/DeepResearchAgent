@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -26,6 +27,10 @@ from deep_research_agent.events import (
     set_event_sink,
     set_ui_language,
 )
+from deep_research_agent.knowledge.embedding import QwenEmbeddingClient
+from deep_research_agent.knowledge.models import PaperUpload
+from deep_research_agent.knowledge.service import PaperKnowledgeService
+from deep_research_agent.knowledge.store import PaperVectorStore
 
 load_dotenv()
 
@@ -112,6 +117,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def get_paper_knowledge_service() -> PaperKnowledgeService:
+    """Build the local private-paper knowledge service."""
+    configuration = Configuration.from_runnable_config()
+    api_key = os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("QWEN_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="DASHSCOPE_API_KEY is not configured")
+    return PaperKnowledgeService(
+        store=PaperVectorStore(configuration.knowledge_base_path),
+        embedding_client=QwenEmbeddingClient(
+            api_key=api_key,
+            model=configuration.embedding_model,
+        ),
+        chunk_size=configuration.paper_chunk_size,
+        chunk_overlap=configuration.paper_chunk_overlap,
+        max_size_mb=configuration.max_paper_size_mb,
+    )
+
+
+@app.post("/api/knowledge/papers")
+async def upload_private_papers(
+    files: list[UploadFile] = File(...),
+    service: PaperKnowledgeService = Depends(get_paper_knowledge_service),
+) -> dict[str, Any]:
+    """Upload and ingest private paper PDFs."""
+    uploads = [
+        PaperUpload(
+            file_name=file.filename or "unnamed.pdf",
+            content_type=file.content_type or "",
+            data=await file.read(),
+        )
+        for file in files
+    ]
+    return (await service.ingest_files(uploads)).model_dump()
+
+
+@app.get("/api/knowledge/papers")
+async def list_private_papers(
+    service: PaperKnowledgeService = Depends(get_paper_knowledge_service),
+) -> dict[str, Any]:
+    """List papers currently stored in the private knowledge base."""
+    return {"papers": [paper.model_dump() for paper in await service.list_papers()]}
 
 
 def _runnable_config(record: RunRecord) -> dict[str, Any]:
