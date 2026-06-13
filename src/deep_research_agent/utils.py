@@ -33,7 +33,7 @@ from mcp import McpError
 
 from deep_research_agent.configuration import Configuration, SearchAPI
 from deep_research_agent.knowledge.embedding import QwenEmbeddingClient
-from deep_research_agent.knowledge.store import PaperVectorStore
+from deep_research_agent.knowledge.store import get_paper_vector_store
 from deep_research_agent.knowledge.tools import create_private_paper_search_tool
 from deep_research_agent.prompts import summarize_webpage_prompt
 from deep_research_agent.state import ResearchComplete, Summary
@@ -629,7 +629,7 @@ def get_private_paper_search_tool(configurable: Configuration) -> StructuredTool
     if not api_key:
         return None
     return create_private_paper_search_tool(
-        store=PaperVectorStore(configurable.knowledge_base_path),
+        store=get_paper_vector_store(configurable.knowledge_base_path),
         embedding_client=QwenEmbeddingClient(
             api_key=api_key,
             model=configurable.embedding_model,

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from deep_research_agent.configuration import Configuration
 from deep_research_agent.knowledge.embedding import QwenEmbeddingClient
@@ -27,7 +27,7 @@ class RetrievalEvalCase(BaseModel):
     """A retrieval question and its manually labeled relevant chunks."""
 
     question: str
-    gold_evidence: list[GoldEvidence]
+    gold_evidence: list[GoldEvidence] = Field(min_length=1)
     index_version: str
 
 

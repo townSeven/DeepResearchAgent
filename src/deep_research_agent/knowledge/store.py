@@ -1,6 +1,7 @@
 """Persistent Chroma storage for private paper chunks."""
 
 import asyncio
+from functools import lru_cache
 from pathlib import Path
 
 import chromadb
@@ -136,3 +137,9 @@ class PaperVectorStore:
                 strict=True,
             )
         ]
+
+
+@lru_cache(maxsize=8)
+def get_paper_vector_store(path: str) -> PaperVectorStore:
+    """Reuse one persistent Chroma client for each configured path."""
+    return PaperVectorStore(path)

@@ -97,10 +97,13 @@ class QwenEmbeddingClient:
         try:
             items = response_json["output"]["embeddings"]
             ordered = sorted(items, key=lambda item: item["index"])
+            indexes = [item["index"] for item in ordered]
             embeddings = [item["embedding"] for item in ordered]
         except (KeyError, TypeError) as exc:
             raise EmbeddingError("Qwen embedding response is malformed") from exc
 
+        if indexes != list(range(expected_count)):
+            raise EmbeddingError("Qwen embedding response indexes do not match input")
         if len(embeddings) != expected_count or not embeddings:
             raise EmbeddingError("Qwen embedding response count does not match input")
         dimensions = {len(embedding) for embedding in embeddings}

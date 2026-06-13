@@ -5,7 +5,11 @@ from deep_research_agent.knowledge.models import (
     PaperIngestionFailure,
     PaperIngestionSummary,
 )
-from deep_research_agent.server import app, get_paper_knowledge_service
+from deep_research_agent.server import (
+    app,
+    get_configured_paper_vector_store,
+    get_paper_knowledge_service,
+)
 
 
 class FakePaperKnowledgeService:
@@ -56,7 +60,7 @@ def test_upload_private_papers_returns_per_file_summary():
 
 def test_list_private_papers_returns_current_collection():
     service = FakePaperKnowledgeService()
-    app.dependency_overrides[get_paper_knowledge_service] = lambda: service
+    app.dependency_overrides[get_configured_paper_vector_store] = lambda: service
     client = TestClient(app)
     try:
         response = client.get("/api/knowledge/papers")

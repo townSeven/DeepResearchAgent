@@ -98,6 +98,14 @@ async def test_embed_documents_batches_large_inputs():
                 ]
             }
         },
+        {
+            "output": {
+                "embeddings": [
+                    {"index": 0, "embedding": [1.0, 0.0]},
+                    {"index": 0, "embedding": [0.0, 1.0]},
+                ]
+            }
+        },
     ],
 )
 async def test_embed_documents_rejects_malformed_responses(response_json):

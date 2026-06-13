@@ -30,7 +30,7 @@ from deep_research_agent.events import (
 from deep_research_agent.knowledge.embedding import QwenEmbeddingClient
 from deep_research_agent.knowledge.models import PaperUpload
 from deep_research_agent.knowledge.service import PaperKnowledgeService
-from deep_research_agent.knowledge.store import PaperVectorStore
+from deep_research_agent.knowledge.store import PaperVectorStore, get_paper_vector_store
 
 load_dotenv()
 
@@ -119,14 +119,22 @@ app.add_middleware(
 )
 
 
-def get_paper_knowledge_service() -> PaperKnowledgeService:
+def get_configured_paper_vector_store() -> PaperVectorStore:
+    """Return the configured local private-paper vector store."""
+    configuration = Configuration.from_runnable_config()
+    return get_paper_vector_store(configuration.knowledge_base_path)
+
+
+def get_paper_knowledge_service(
+    store: PaperVectorStore = Depends(get_configured_paper_vector_store),
+) -> PaperKnowledgeService:
     """Build the local private-paper knowledge service."""
     configuration = Configuration.from_runnable_config()
     api_key = os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("QWEN_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="DASHSCOPE_API_KEY is not configured")
     return PaperKnowledgeService(
-        store=PaperVectorStore(configuration.knowledge_base_path),
+        store=store,
         embedding_client=QwenEmbeddingClient(
             api_key=api_key,
             model=configuration.embedding_model,
@@ -156,10 +164,10 @@ async def upload_private_papers(
 
 @app.get("/api/knowledge/papers")
 async def list_private_papers(
-    service: PaperKnowledgeService = Depends(get_paper_knowledge_service),
+    store: PaperVectorStore = Depends(get_configured_paper_vector_store),
 ) -> dict[str, Any]:
     """List papers currently stored in the private knowledge base."""
-    return {"papers": [paper.model_dump() for paper in await service.list_papers()]}
+    return {"papers": [paper.model_dump() for paper in await store.list_papers()]}
 
 
 def _runnable_config(record: RunRecord) -> dict[str, Any]:

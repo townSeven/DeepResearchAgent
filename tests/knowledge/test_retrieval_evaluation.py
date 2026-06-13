@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from deep_research_agent.knowledge.evaluation import (
     GoldEvidence,
@@ -46,6 +47,15 @@ def make_case() -> RetrievalEvalCase:
         ],
         index_version="chunk-1200-overlap-200",
     )
+
+
+def test_retrieval_eval_case_requires_gold_evidence():
+    with pytest.raises(ValidationError):
+        RetrievalEvalCase(
+            question="Unlabeled question",
+            gold_evidence=[],
+            index_version="chunk-1200-overlap-200",
+        )
 
 
 @pytest.mark.asyncio
