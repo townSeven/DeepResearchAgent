@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -49,6 +49,18 @@ type RunSnapshot = {
   research_brief?: string | null;
   error?: string | null;
   language?: "zh" | "en";
+};
+
+type PaperInfo = {
+  document_id: string;
+  file_name: string;
+  chunk_count: number;
+};
+
+type PaperIngestionSummary = {
+  ingested: PaperInfo[];
+  skipped: PaperInfo[];
+  failed: { file_name: string; error: string }[];
 };
 
 type ConfigState = {
@@ -212,8 +224,13 @@ export default function App() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [answeredClarificationKey, setAnsweredClarificationKey] = useState("");
+  const [papers, setPapers] = useState<PaperInfo[]>([]);
+  const [papersLoading, setPapersLoading] = useState(true);
+  const [papersUploading, setPapersUploading] = useState(false);
+  const [paperStatus, setPaperStatus] = useState("");
   const sourceRef = useRef<EventSource | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const paperInputRef = useRef<HTMLInputElement | null>(null);
 
   const isBusy = run?.status === "queued" || run?.status === "running";
   const runStatus = run?.status || "idle";
@@ -244,6 +261,51 @@ export default function App() {
   useEffect(() => {
     return () => sourceRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    void refreshPapers();
+  }, []);
+
+  async function refreshPapers() {
+    setPapersLoading(true);
+    try {
+      const response = await fetch("/api/knowledge/papers");
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as { papers: PaperInfo[] };
+      setPapers(data.papers);
+    } catch (error) {
+      setPaperStatus(`无法读取论文库：${getErrorMessage(error)}`);
+    } finally {
+      setPapersLoading(false);
+    }
+  }
+
+  async function uploadPapers(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length || papersUploading) return;
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    setPapersUploading(true);
+    setPaperStatus(`正在解析并入库 ${files.length} 篇论文…`);
+    try {
+      const response = await fetch("/api/knowledge/papers", {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = (await response.json()) as PaperIngestionSummary;
+      setPaperStatus(
+        `已入库 ${result.ingested.length}，跳过重复 ${result.skipped.length}，失败 ${result.failed.length}`,
+      );
+      await refreshPapers();
+    } catch (error) {
+      setPaperStatus(`论文入库失败：${getErrorMessage(error)}`);
+    } finally {
+      setPapersUploading(false);
+    }
+  }
 
   function attachEvents(runId: string) {
     sourceRef.current?.close();
@@ -533,6 +595,47 @@ export default function App() {
             <span className="time">默认</span>
           </button>
         </div>
+
+        <section className="paper-library" aria-labelledby="paper-library-title">
+          <div className="paper-library-head">
+            <div>
+              <strong id="paper-library-title">私有论文库</strong>
+              <span>{papers.length} 篇已入库</span>
+            </div>
+            <button
+              className="paper-upload-button"
+              type="button"
+              disabled={papersUploading}
+              onClick={() => paperInputRef.current?.click()}
+            >
+              {papersUploading ? <Loader2 className="spin small-icon" /> : <Plus size={14} />}
+              上传
+            </button>
+            <input
+              ref={paperInputRef}
+              className="visually-hidden"
+              type="file"
+              accept="application/pdf,.pdf"
+              multiple
+              onChange={uploadPapers}
+            />
+          </div>
+          <div className="paper-list" aria-live="polite">
+            {papersLoading && <span className="paper-empty">正在读取论文库…</span>}
+            {!papersLoading && !papers.length && (
+              <span className="paper-empty">上传本地论文后，研究员可联合私有证据与公开资料。</span>
+            )}
+            {papers.map((paper) => (
+              <div className="paper-item" key={paper.document_id} title={paper.file_name}>
+                <FileText size={14} />
+                <span>{paper.file_name}</span>
+                <small>{paper.chunk_count} chunks</small>
+              </div>
+            ))}
+          </div>
+          {paperStatus && <p className="paper-status" aria-live="polite">{paperStatus}</p>}
+          <p className="paper-privacy">论文片段与检索问题会发送至阿里云百炼生成向量。</p>
+        </section>
 
         <div className="settings-panel side-settings">
           <button className="settings-toggle" type="button" onClick={() => setConfigOpen((value) => !value)}>

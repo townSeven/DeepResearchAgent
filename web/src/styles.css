@@ -252,6 +252,130 @@ textarea {
   font-size: 11px;
 }
 
+.paper-library {
+  margin: 0 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.paper-library-head {
+  min-height: 42px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.paper-library-head > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.paper-library-head strong,
+.paper-library-head span {
+  display: block;
+}
+
+.paper-library-head strong {
+  font-size: 13px;
+}
+
+.paper-library-head span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.paper-upload-button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  background: var(--panel-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.paper-upload-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.paper-list {
+  display: grid;
+  gap: 2px;
+  max-height: 132px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.paper-item {
+  min-height: 30px;
+  padding: 5px 6px;
+  border-radius: var(--radius);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+.paper-item span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-item small {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.paper-empty,
+.paper-status,
+.paper-privacy {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.paper-empty {
+  padding: 5px 4px;
+}
+
+.paper-status,
+.paper-privacy {
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.paper-status {
+  color: var(--text);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .side-settings {
   margin: auto 14px 12px;
   border: 1px solid var(--line);
