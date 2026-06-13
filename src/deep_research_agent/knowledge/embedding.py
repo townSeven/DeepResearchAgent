@@ -23,14 +23,18 @@ class QwenEmbeddingClient:
         model: str = "qwen3-vl-embedding",
         base_url: str = DEFAULT_EMBEDDING_URL,
         http_client: httpx.AsyncClient | None = None,
+        batch_size: int = 10,
     ) -> None:
         """Configure the provider credentials and optional HTTP transport."""
         if not api_key:
             raise EmbeddingError("DASHSCOPE_API_KEY is required")
+        if batch_size < 1:
+            raise EmbeddingError("Embedding batch size must be at least 1")
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.http_client = http_client
+        self.batch_size = batch_size
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of document texts."""
@@ -39,6 +43,21 @@ class QwenEmbeddingClient:
         if any(not text.strip() for text in texts):
             raise EmbeddingError("Embedding inputs must not be empty")
 
+        embeddings = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            embeddings.extend(await self._embed_batch(batch))
+        dimensions = {len(embedding) for embedding in embeddings}
+        if len(dimensions) != 1:
+            raise EmbeddingError("Qwen embedding batches have inconsistent dimensions")
+        return embeddings
+
+    async def embed_query(self, query: str) -> list[float]:
+        """Embed one retrieval query."""
+        embeddings = await self.embed_documents([query])
+        return embeddings[0]
+
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         payload = {
             "model": self.model,
             "input": {"contents": [{"text": text} for text in texts]},
@@ -46,11 +65,6 @@ class QwenEmbeddingClient:
         }
         response_json = await self._post(payload)
         return self._parse_embeddings(response_json, len(texts))
-
-    async def embed_query(self, query: str) -> list[float]:
-        """Embed one retrieval query."""
-        embeddings = await self.embed_documents([query])
-        return embeddings[0]
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"}
