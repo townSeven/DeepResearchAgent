@@ -70,6 +70,17 @@ class PaperVectorStore:
         """Return the number of stored chunks."""
         return await asyncio.to_thread(self.collection.count)
 
+    async def existing_chunk_ids(self, chunk_ids: list[str]) -> set[str]:
+        """Return the requested chunk IDs that exist in the collection."""
+        if not chunk_ids:
+            return set()
+        response = await asyncio.to_thread(
+            self.collection.get,
+            ids=chunk_ids,
+            include=[],
+        )
+        return set(response["ids"])
+
     async def list_papers(self) -> list[PaperInfo]:
         """Aggregate stored chunks into paper summaries."""
         response = await asyncio.to_thread(self.collection.get, include=["metadatas"])

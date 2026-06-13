@@ -50,6 +50,17 @@ async def test_store_skips_an_existing_document(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_store_reports_existing_chunk_ids(tmp_path):
+    chunk = make_chunk("chunk-a", "paper-a", "alpha method")
+    store = PaperVectorStore(tmp_path)
+    await store.add_document([chunk], [[1.0, 0.0]])
+
+    existing = await store.existing_chunk_ids(["chunk-a", "missing"])
+
+    assert existing == {"chunk-a"}
+
+
+@pytest.mark.asyncio
 async def test_store_returns_empty_results_for_empty_collection(tmp_path):
     store = PaperVectorStore(tmp_path)
 
