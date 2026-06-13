@@ -139,6 +139,14 @@ class Configuration(BaseModel):
             }
         }
     )
+    # Private paper knowledge base
+    private_papers_enabled: bool = True
+    private_papers_top_k: int = Field(default=5, ge=1, le=20)
+    knowledge_base_path: str = ".knowledge/private_papers"
+    embedding_model: str = "qwen3-vl-embedding"
+    paper_chunk_size: int = Field(default=1200, ge=100)
+    paper_chunk_overlap: int = Field(default=200, ge=0)
+    max_paper_size_mb: int = Field(default=25, ge=1)
     # Model Configuration
     summarization_model: str = Field(
         default="deepseek:deepseek-v4-flash",

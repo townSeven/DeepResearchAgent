@@ -67,3 +67,6 @@ tmp/
 temp/
 
 .langgraph_api
+
+# Local private-paper knowledge base
+.knowledge/
