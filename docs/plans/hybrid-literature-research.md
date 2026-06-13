@@ -3,7 +3,7 @@
 ## Status
 
 - Spec: `docs/specs/hybrid-literature-research.md`
-- State: Awaiting human review
+- State: Tasks 1-10 implemented; Task 11 local evaluation runs pending
 - Scope: MVP
 
 ## Overview

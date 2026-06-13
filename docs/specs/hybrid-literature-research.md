@@ -2,8 +2,8 @@
 
 ## Status
 
-- Phase: Plan
-- State: Approved
+- Phase: Implement
+- State: MVP implemented; local evaluation evidence pending
 - Feature name: Hybrid Literature Research
 
 ## Assumptions To Confirm
