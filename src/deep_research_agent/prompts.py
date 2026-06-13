@@ -162,9 +162,10 @@ You can use any of the tools provided to you to find resources that can help ans
 </Task>
 
 <Available Tools>
-You have access to two main tools:
+You have access to three main tool categories:
 1. **tavily_search**: For conducting web searches to gather information
-2. **think_tool**: For reflection and strategic planning during research
+2. **search_private_papers**: For retrieving user-provided private papers with file-name and page citations
+3. **think_tool**: For reflection and strategic planning during research
 {mcp_prompt}
 
 **CRITICAL: Use think_tool after each search to reflect on results and plan next steps. Do not call think_tool with the tavily_search or any other tools. It should be to reflect on the results of the search.**
@@ -178,6 +179,7 @@ Think like a human researcher with limited time. Follow these steps:
 3. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
 4. **Execute narrower searches as you gather information** - Fill in the gaps
 5. **Stop when you can answer confidently** - Don't keep searching for perfection
+6. Use private-paper search for unpublished, local, or user-provided evidence. Use web search for public and current evidence. For comparisons, literature reviews, and research-gap analysis, use both when relevant.
 </Instructions>
 
 <Language>
@@ -227,6 +229,7 @@ Write the cleaned findings in the same language as the user's original request. 
 4. You should include a "Sources" section at the end of the report that lists all of the sources the researcher found with corresponding citations, cited against statements in the report.
 5. Make sure to include ALL of the sources that the researcher gathered in the report, and how they were used to answer the question!
 6. It's really important not to lose any sources. A later LLM will be used to merge this report with others, so having all of the sources is critical.
+7. Preserve every `[Private Paper: <file>, Page <page>, Chunk <id>]` marker exactly so the final report can cite private evidence accurately.
 </Guidelines>
 
 <Output Format>
@@ -286,6 +289,7 @@ Please create a detailed answer to the overall research brief that:
 3. References relevant sources using [Title](URL) format
 4. Provides a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
 5. Includes a source section at the end with all referenced links. Use a source-section heading in the target language, e.g. "### 参考来源" for Chinese and "### Sources" for English.
+6. Preserves private-paper citations using the exact `[Private Paper: <file>, Page <page>, Chunk <id>]` marker associated with the supporting claim. Never invent a private file, page, or chunk citation.
 
 You can structure your report in a number of different ways. The examples below describe structure only. Do not copy the English labels from these examples; all generated headings and labels must be written in the target language.
 
