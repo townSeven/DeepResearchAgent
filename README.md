@@ -1,6 +1,8 @@
 # Deep Research Agent
 
-Deep Research Agent 是一个面向自动化深度研究的智能体项目。它围绕“澄清问题、制定研究计划、检索资料、压缩笔记、生成报告”这条主流程组织，适合用于行业研究、学术资料整理、竞品分析、技术调研和长报告生成。
+Deep Research Agent 是一个面向自动化深度研究的多智能体项目。它围绕“澄清问题、制定研究计划、检索资料、压缩笔记、生成报告、沉淀研究记忆”这条主流程组织，适合用于行业研究、学术资料整理、竞品分析、技术调研和长报告生成。
+
+项目基于 LangGraph 搭建 Supervisor-Researcher 协作流程，支持 Web Search 与私有论文知识库混合检索，并通过 SQLite 与 LangGraph checkpoint 保存研究线程、对话、进度事件、报告版本和运行状态。用户可以在服务重启后查看历史任务、恢复中断研究、对已完成报告继续追问，并在新任务中按需复用历史研究成果。
 
 ## 项目内容
 
@@ -20,6 +22,7 @@ DeepResearchAgent/
       configuration.py
       deep_researcher.py
       knowledge/
+      persistence/
       server.py
   docs/
     evaluations/
@@ -95,42 +98,17 @@ http://127.0.0.1:5173
 
 Web UI 用于展示一次研究任务的实时进度，包括问题澄清、计划生成、资料检索、笔记压缩和最终报告生成。
 
-## 私有论文混合研究
-
-系统支持上传合法持有的文本型 PDF，并让 Researcher 联合私有论文知识库与 Web Search 开展调研。它不是独立的 PDF Chat：私有论文检索作为 `search_private_papers` 工具接入现有 Supervisor-Researcher 流程。
-
-```mermaid
-flowchart LR
-    PDF[本地私有论文 PDF] --> Parse[PyMuPDF 按页解析与分块]
-    Parse --> Embed[qwen3-vl-embedding]
-    Embed --> Chroma[(ChromaDB)]
-    Chroma --> PrivateSearch[search_private_papers]
-    Web[Web Search] --> Researcher[Researcher Agent]
-    PrivateSearch --> Researcher
-    Researcher --> Report[带网页链接与私有论文页码引用的报告]
-```
-
-核心能力：
-
-- PDF 按页解析、稳定 chunk ID、重复文档检测
-- 阿里云百炼 `qwen3-vl-embedding` 默认维度向量
-- ChromaDB 本地持久化与 Top-K 检索
-- Agent 自主选择私有论文、Web Search 或联合检索
-- `[Private Paper: 文件名, Page 页码, Chunk ID]` 可追溯引用
-- Recall@K 与 Hit Rate@K 检索评测 CLI
-
-启动 FastAPI 与 Web UI 后，在侧栏“私有论文库”上传 PDF，再提交需要联合私有与公开证据的研究课题。
-
-数据边界：PDF 文件与 Chroma 数据保存在本地；解析后的论文 chunks 和检索 query 会发送至阿里云百炼生成向量，不会发送至 Web Search 服务。MVP 不支持扫描件 OCR、复杂表格解析或受限数据库抓取。
-
 ## 配置说明
 
-核心配置通常包括四类模型：
+核心配置通常包括模型与记忆配置：
 
 - `summarization_model`：总结搜索结果。
 - `research_model`：驱动研究智能体。
 - `compression_model`：压缩研究笔记。
 - `final_report_model`：生成最终报告。
+- `research_database_path`：保存研究线程、消息、事件和报告版本的 SQLite 路径。
+- `checkpoint_database_path`：保存 LangGraph 运行 checkpoint 的 SQLite 路径。
+- `research_history_enabled`：是否在新任务中复用历史研究成果。
 
 模型需要支持结构化输出和工具调用。搜索工具可按需要接入 Tavily、模型原生搜索、自定义 MCP 工具或其他检索服务。
 

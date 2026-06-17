@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
   BarChart3,
@@ -22,6 +23,7 @@ import {
   Settings2,
   ShieldCheck,
   Square,
+  Trash2,
 } from "lucide-react";
 
 type RunStatus =
@@ -30,7 +32,13 @@ type RunStatus =
   | "requires_clarification"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted";
+
+type RunMessage = {
+  type: string;
+  content: string;
+};
 
 type ProgressEvent = {
   id: string;
@@ -43,13 +51,19 @@ type ProgressEvent = {
 
 type RunSnapshot = {
   id: string;
+  title?: string;
   status: RunStatus;
+  messages?: RunMessage[];
   events: ProgressEvent[];
   final_report?: string | null;
   research_brief?: string | null;
+  last_follow_up_answer?: string | null;
   error?: string | null;
   language?: "zh" | "en";
+  updated_at?: string;
 };
+
+type RunSummary = Pick<RunSnapshot, "id" | "title" | "status" | "final_report" | "updated_at">;
 
 type PaperInfo = {
   document_id: string;
@@ -66,6 +80,7 @@ type PaperIngestionSummary = {
 type ConfigState = {
   searchApi: string;
   allowClarification: boolean;
+  reuseHistoricalResearch: boolean;
   researchModel: string;
   summarizationModel: string;
   compressionModel: string;
@@ -78,6 +93,7 @@ type ConfigState = {
 const defaultConfig: ConfigState = {
   searchApi: "tavily",
   allowClarification: true,
+  reuseHistoricalResearch: false,
   researchModel: "deepseek:deepseek-v4-flash",
   summarizationModel: "deepseek:deepseek-v4-flash",
   compressionModel: "deepseek:deepseek-v4-flash",
@@ -87,7 +103,7 @@ const defaultConfig: ConfigState = {
   maxReactToolCalls: 10,
 };
 
-const terminalStatuses: RunStatus[] = ["completed", "failed", "cancelled"];
+const terminalStatuses: RunStatus[] = ["completed", "failed", "cancelled", "interrupted"];
 const hiddenTimelineEvents = new Set([
   "final_report_delta",
   "research_tasks_started",
@@ -110,12 +126,14 @@ const statusLabels: Record<RunStatus | "idle", string> = {
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  interrupted: "已中断",
 };
 
 function toApiConfig(config: ConfigState) {
   return {
     search_api: config.searchApi,
     allow_clarification: config.allowClarification,
+    research_history_enabled: config.reuseHistoricalResearch,
     research_model: config.researchModel,
     summarization_model: config.summarizationModel,
     compression_model: config.compressionModel,
@@ -172,9 +190,159 @@ function getEventText(event: ProgressEvent) {
   );
 }
 
+function getSubResearchTitle(topic: string) {
+  const bracketTitle = topic.match(/^【([^】]+)】/)?.[1] || topic.match(/^\[([^\]]+)\]/)?.[1];
+  if (bracketTitle) return bracketTitle.trim();
+  const firstClause = topic.split(/[。！？.!?\n]/)[0]?.trim();
+  return firstClause.length > 80 ? `${firstClause.slice(0, 80)}...` : firstClause || topic;
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function splitMarkdownTableCells(line: string) {
+  const trimmed = line.trim();
+  const withoutLeadingPipe = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
+  const withoutOuterPipes = withoutLeadingPipe.endsWith("|") ? withoutLeadingPipe.slice(0, -1) : withoutLeadingPipe;
+  return withoutOuterPipes.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line: string) {
+  const cells = splitMarkdownTableCells(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownTableRow(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed || /^#{1,6}\s/.test(trimmed) || /^[-*+]\s/.test(trimmed)) return false;
+  return splitMarkdownTableCells(trimmed).length > 1;
+}
+
+function formatMarkdownTableRow(cells: string[]) {
+  const normalizedCells = cells.map((cell, index) => (index === 0 ? cell.replace(/^[,，]\s*/, "") : cell));
+  return `| ${normalizedCells.map((cell) => cell || " ").join(" | ")} |`;
+}
+
+function startsWithRatingCell(cells: string[]) {
+  return Boolean(cells[0]?.trim().startsWith("⭐"));
+}
+
+function findNextNonEmptyLineIndex(lines: string[], startIndex: number) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (lines[index].trim()) return index;
+  }
+  return -1;
+}
+
+function pushPaddedTableRow(rows: string[], cells: string[], columnCount: number) {
+  if (!cells.length) return;
+  rows.push(formatMarkdownTableRow([...cells, ...Array.from({ length: Math.max(0, columnCount - cells.length) }, () => "")]));
+  cells.length = 0;
+}
+
+function normalizeMarkdownTables(markdown: string) {
+  const lines = markdown.split("\n");
+  const normalized: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const nextLine = lines[index + 1];
+    if (!isMarkdownTableRow(line) || !nextLine || !isMarkdownTableSeparator(nextLine)) {
+      normalized.push(line);
+      continue;
+    }
+
+    const headerCells = splitMarkdownTableCells(line);
+    const columnCount = headerCells.length;
+    normalized.push(formatMarkdownTableRow(headerCells));
+    normalized.push(formatMarkdownTableRow(Array.from({ length: columnCount }, () => "---")));
+    index += 1;
+
+    const pendingCells: string[] = [];
+    while (index + 1 < lines.length) {
+      const candidate = lines[index + 1];
+      if (!candidate.trim()) {
+        const nextIndex = findNextNonEmptyLineIndex(lines, index + 2);
+        const nextCandidate = nextIndex >= 0 ? lines[nextIndex] : "";
+        if (pendingCells.length) {
+          pushPaddedTableRow(normalized, pendingCells, columnCount);
+        }
+        if (nextCandidate && (isMarkdownTableRow(nextCandidate) || isMarkdownTableRow(lines[findNextNonEmptyLineIndex(lines, nextIndex + 1)] || ""))) {
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      if (!isMarkdownTableRow(candidate)) {
+        const nextIndex = findNextNonEmptyLineIndex(lines, index + 2);
+        const nextCandidate = nextIndex >= 0 ? lines[nextIndex] : "";
+        if (nextCandidate && isMarkdownTableRow(nextCandidate)) {
+          pendingCells.push(candidate.trim());
+          index += 1;
+          continue;
+        }
+        if (pendingCells.length) {
+          pushPaddedTableRow(normalized, pendingCells, columnCount);
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      if (isMarkdownTableSeparator(candidate)) {
+        index += 1;
+        continue;
+      }
+
+      const cells = splitMarkdownTableCells(candidate);
+      if (!pendingCells.length && startsWithRatingCell(cells) && cells.length <= columnCount - 2) {
+        pendingCells.push(...Array.from({ length: columnCount - cells.length }, () => ""));
+      }
+      if (pendingCells.length === 1 && startsWithRatingCell(cells) && cells.length <= columnCount - 2) {
+        pendingCells.push(...Array.from({ length: columnCount - 1 - cells.length }, () => ""));
+      }
+      pendingCells.push(...cells);
+      index += 1;
+
+      while (pendingCells.length >= columnCount) {
+        if (!pendingCells[0] && pendingCells.length > columnCount) {
+          pendingCells.shift();
+          continue;
+        }
+        normalized.push(formatMarkdownTableRow(pendingCells.splice(0, columnCount)));
+      }
+    }
+
+    if (pendingCells.length >= Math.ceil(columnCount / 2)) {
+      normalized.push(formatMarkdownTableRow([...pendingCells, ...Array.from({ length: columnCount - pendingCells.length }, () => "")]));
+    }
+  }
+
+  return normalized.join("\n");
+}
+
+function normalizeStreamingMarkdown(markdown: string) {
+  let text = markdown.replace(/\r\n?/g, "\n");
+
+  // Streaming model output often arrives as "text## Heading" or "#Heading".
+  text = text.replace(/([^\n#\\])(?=#{2,6}(?!#))/g, "$1\n\n");
+  text = text.replace(/^(#{1,6})(?=[^\s#])/gm, "$1 ");
+  text = text.replace(/^(#{1,6}\s+)\\?#\s*(.+)$/gm, "$1$2");
+  text = text.replace(/^\\?#{1,6}\s*([一二三四五六七八九十]+、\s*.+)$/gm, "## $1");
+  text = text.replace(/^\\?#{1,6}\s*(\d+(?:\.\d+)+\s*.+)$/gm, "### $1");
+  text = text.replace(/^\\(#{1,6}\s+.+)$/gm, "$1");
+
+  // Keep headings and following tables as separate Markdown blocks.
+  text = text.replace(/^(#{1,6}\s[^\n|]+?)\s+(\|[^\n]+\|)$/gm, "$1\n\n$2");
+  text = text.replace(/\|\s*\|\s*(?=[\p{L}\p{N}_.,，、(（【[][^|\n]{0,100}\|)/gu, "|\n| ");
+
+  return normalizeMarkdownTables(text);
+}
+
+function MarkdownContent({ children }: { children: string }) {
+  const normalized = useMemo(() => normalizeStreamingMarkdown(children), [children]);
+  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalized}</ReactMarkdown>;
 }
 
 function streamStepFor(text: string) {
@@ -212,6 +380,106 @@ function StreamingText({ text, className }: { text: string; className?: string }
   );
 }
 
+type StageState = "waiting" | "running" | "completed" | "failed";
+
+type ResearchStage = {
+  title: string;
+  description: string;
+  state: StageState;
+};
+
+type AgentState = {
+  id: string;
+  name: string;
+  role: string;
+  state: StageState;
+};
+
+const stageDefinitions = [
+  {
+    title: "明确研究目标",
+    description: "理解问题、确认范围并形成研究计划。",
+    active: ["run_started", "clarifying", "research_brief_started"],
+    done: ["research_brief_created", "research_plan_created"],
+  },
+  {
+    title: "收集 Web 信息",
+    description: "并行检索公开网页与实时资料。",
+    active: ["search_started"],
+    done: ["search_completed", "research_phase_completed"],
+  },
+  {
+    title: "检索私有论文库",
+    description: "联合本地论文和专业资料进行检索。",
+    active: ["tool_started", "tool_batch_started"],
+    done: ["tool_completed", "research_phase_completed"],
+  },
+  {
+    title: "聚合与压缩证据",
+    description: "整理研究笔记并提炼关键证据。",
+    active: ["researcher_ready_to_compress", "compressing_research"],
+    done: ["research_compressed", "research_phase_completed"],
+  },
+  {
+    title: "生成报告",
+    description: "综合研究结论并生成最终报告。",
+    active: ["writing_final_report", "final_report_delta"],
+    done: ["final_report_created", "run_completed"],
+  },
+];
+
+function deriveStages(events: ProgressEvent[], runStatus: RunStatus | "idle"): ResearchStage[] {
+  const types = new Set(events.map((event) => event.type));
+  const failed = runStatus === "failed";
+  let activeFound = false;
+
+  return stageDefinitions.map((stage, index) => {
+    const completed = stage.done.some((type) => types.has(type));
+    const active = stage.active.some((type) => types.has(type));
+    let state: StageState = completed ? "completed" : active ? "running" : "waiting";
+
+    if (runStatus === "completed") state = "completed";
+    if (failed && !activeFound && (active || (!completed && index === 0))) state = "failed";
+    if (state === "running" || state === "failed") activeFound = true;
+    return { title: stage.title, description: stage.description, state };
+  });
+}
+
+function deriveAgents(events: ProgressEvent[], runStatus: RunStatus | "idle"): AgentState[] {
+  const agents = new Map<string, AgentState>();
+  const supervisorRunning = events.some((event) =>
+    ["supervisor_planning", "research_plan_created", "research_tasks_started"].includes(event.type),
+  );
+  agents.set("supervisor", {
+    id: "supervisor",
+    name: "Supervisor",
+    role: "任务与调度",
+    state: runStatus === "completed" ? "completed" : supervisorRunning ? "running" : "waiting",
+  });
+
+  for (const event of events) {
+    const topic = event.data?.topic as string | undefined;
+    const index = event.data?.index as number | undefined;
+    if (index === undefined && !topic) continue;
+    const id = `researcher-${topic || index}`;
+    const previous = agents.get(id);
+    let state = previous?.state || "waiting";
+    if (event.type === "research_task_started" || event.type === "researcher_thinking" || event.type === "search_started" || event.type === "compressing_research") {
+      state = "running";
+    }
+    if (event.type === "research_task_completed" || event.type === "research_compressed") state = "completed";
+    if (event.type.includes("failed")) state = "failed";
+    agents.set(id, {
+      id,
+      name: previous?.name || `Researcher ${(index ?? agents.size - 1) + 1}`,
+      role: topic || previous?.role || "研究任务",
+      state,
+    });
+  }
+
+  return [...agents.values()];
+}
+
 export default function App() {
   const [prompt, setPrompt] = useState("");
   const [submittedPrompt, setSubmittedPrompt] = useState("");
@@ -228,11 +496,17 @@ export default function App() {
   const [papersLoading, setPapersLoading] = useState(true);
   const [papersUploading, setPapersUploading] = useState(false);
   const [paperStatus, setPaperStatus] = useState("");
+  const [runHistory, setRunHistory] = useState<RunSummary[]>([]);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [deletingRunId, setDeletingRunId] = useState("");
+  const [expandedStages, setExpandedStages] = useState<Set<number>>(new Set());
+  const [now, setNow] = useState(() => Date.now());
   const sourceRef = useRef<EventSource | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const paperInputRef = useRef<HTMLInputElement | null>(null);
 
   const isBusy = run?.status === "queued" || run?.status === "running";
+  const canCancel = Boolean(run && !terminalStatuses.includes(run.status));
   const runStatus = run?.status || "idle";
   const clarificationEvent = useMemo(() => getClarificationEvent(events), [events]);
   const clarificationQuestion = useMemo(() => getClarificationQuestion(events), [events]);
@@ -244,12 +518,45 @@ export default function App() {
     [events],
   );
   const latestEvent = visibleEvents[visibleEvents.length - 1];
-  const planEvents = visibleEvents.filter((event) => event.type.includes("plan") || event.type.includes("brief"));
+  const planEvents = visibleEvents.filter((event) => event.type === "research_plan_created");
   const sourceEvents = events.filter((event) => event.type.includes("search") || event.type.includes("tool")).slice(-5);
   const completedEvents = visibleEvents.filter((event) => event.type.includes("completed") || event.type.includes("created"));
-  const displayPrompt = submittedPrompt || prompt.trim();
-  const conversationTitle = displayPrompt || "准备开始新的深度研究";
+  const displayPrompt = submittedPrompt;
+  const conversationTitle = run?.title || submittedPrompt || "准备开始新的深度研究";
   const reportReady = Boolean(finalReport);
+  const latestFollowUp = run?.last_follow_up_answer;
+  const stages = useMemo(() => deriveStages(events, runStatus), [events, runStatus]);
+  const agents = useMemo(() => deriveAgents(events, runStatus), [events, runStatus]);
+  const completedSubResearchTopics = useMemo(
+    () =>
+      new Set(
+        events
+          .filter((event) => event.type === "research_task_completed")
+          .map((event) => event.data?.topic as string | undefined)
+          .filter((topic): topic is string => Boolean(topic)),
+      ),
+    [events],
+  );
+  const filteredHistory = useMemo(
+    () => runHistory.filter((item) => (item.title || "").toLowerCase().includes(historyQuery.trim().toLowerCase())),
+    [historyQuery, runHistory],
+  );
+  const progress = useMemo(() => {
+    if (runStatus === "completed") return 100;
+    const completed = stages.filter((stage) => stage.state === "completed").length;
+    const running = stages.some((stage) => stage.state === "running");
+    return Math.min(95, Math.round(((completed + (running ? 0.55 : 0)) / stages.length) * 100));
+  }, [runStatus, stages]);
+  const currentStage = stages.find((stage) => stage.state === "running" || stage.state === "failed");
+  const elapsedEnd = isBusy || !run?.updated_at ? now : new Date(run.updated_at).getTime();
+  const elapsed = events[0]?.created_at ? Math.max(0, Math.floor((elapsedEnd - new Date(events[0].created_at).getTime()) / 1000)) : 0;
+  const elapsedLabel = `${String(Math.floor(elapsed / 3600)).padStart(2, "0")}:${String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
+
+  useEffect(() => {
+    if (!isBusy) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isBusy]);
 
   useEffect(() => {
     threadRef.current?.scrollTo({
@@ -264,7 +571,19 @@ export default function App() {
 
   useEffect(() => {
     void refreshPapers();
+    void refreshRunHistory();
   }, []);
+
+  async function refreshRunHistory() {
+    try {
+      const response = await fetch("/api/runs");
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as { runs: RunSummary[] };
+      setRunHistory(data.runs);
+    } catch (error) {
+      setError(`无法读取历史任务：${getErrorMessage(error)}`);
+    }
+  }
 
   async function refreshPapers() {
     setPapersLoading(true);
@@ -353,6 +672,7 @@ export default function App() {
       "writing_final_report",
       "final_report_delta",
       "final_report_created",
+      "follow_up_completed",
       "run_completed",
       "run_cancelled",
       "run_failed",
@@ -373,6 +693,11 @@ export default function App() {
           const report = event.data?.final_report as string | undefined;
           setRun((current) => current && { ...current, status: "completed", final_report: report || current.final_report });
           source.close();
+          void refreshRun(runId);
+        }
+        if (type === "follow_up_completed") {
+          source.close();
+          void refreshRun(runId);
         }
         if (type === "clarification_required") {
           setRun((current) => current && { ...current, status: "requires_clarification" });
@@ -405,11 +730,17 @@ export default function App() {
     if (event.type === "research_plan_created" && (event.data?.topics as string[] | undefined)?.length) {
       details.push(
         <ul className="topic-list" key="topics">
-          {(event.data?.topics as string[]).map((topic, index) => (
-            <li key={`${event.id}-${index}`}>
-              <StreamingText text={topic} />
-            </li>
-          ))}
+          {(event.data?.topics as string[]).map((topic, index) => {
+            const completed = runStatus === "completed" || completedSubResearchTopics.has(topic);
+            return (
+              <li key={`${event.id}-${index}`}>
+                <span className={`subtask-progress ${completed ? "done" : "running"}`} aria-label={completed ? "已完成" : "进行中"}>
+                  {completed && <CheckCircle2 size={15} />}
+                </span>
+                <StreamingText text={getSubResearchTitle(topic)} />
+              </li>
+            );
+          })}
         </ul>,
       );
     }
@@ -436,6 +767,8 @@ export default function App() {
       setEvents(snapshot.events || []);
       setFinalReport(snapshot.final_report || "");
       setError(snapshot.error || "");
+      setSubmittedPrompt(snapshot.messages?.find((message) => message.type === "human")?.content || "");
+      await refreshRunHistory();
     } catch (error) {
       setError(`无法连接后端 API：${getErrorMessage(error)}。请确认 FastAPI 后端正在 http://127.0.0.1:8000 运行。`);
     }
@@ -471,8 +804,42 @@ export default function App() {
       setRun(snapshot);
       setPrompt("");
       attachEvents(snapshot.id);
+      await refreshRunHistory();
     } catch (error) {
       setError(`无法创建研究任务：${getErrorMessage(error)}。请确认 FastAPI 后端正在 http://127.0.0.1:8000 运行。`);
+    }
+  }
+
+  async function sendFollowUp(event: FormEvent) {
+    event.preventDefault();
+    if (!run || !prompt.trim() || isBusy) return;
+    const message = prompt.trim();
+    setPrompt("");
+    setError("");
+    try {
+      const response = await fetch(`/api/runs/${run.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, mode: "auto" }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const snapshot = (await response.json()) as RunSnapshot;
+      setRun(snapshot);
+      attachEvents(run.id);
+    } catch (error) {
+      setError(`无法继续研究任务：${getErrorMessage(error)}`);
+    }
+  }
+
+  async function retryRun() {
+    if (!run || run.status !== "interrupted") return;
+    try {
+      const response = await fetch(`/api/runs/${run.id}/retry`, { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      setRun((await response.json()) as RunSnapshot);
+      attachEvents(run.id);
+    } catch (error) {
+      setError(`无法恢复研究任务：${getErrorMessage(error)}`);
     }
   }
 
@@ -513,6 +880,32 @@ export default function App() {
     }
   }
 
+  async function deleteHistoryRun(runId: string, title?: string) {
+    if (deletingRunId) return;
+    const confirmed = window.confirm(`删除“${title || "未命名研究"}”？此操作会移除该研究会话和已保存报告。`);
+    if (!confirmed) return;
+
+    setDeletingRunId(runId);
+    setError("");
+    try {
+      const response = await fetch(`/api/runs/${runId}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await response.text());
+      if (run?.id === runId) {
+        sourceRef.current?.close();
+        setRun(null);
+        setEvents([]);
+        setFinalReport("");
+        setSubmittedPrompt("");
+        setAnsweredClarificationKey("");
+      }
+      setRunHistory((current) => current.filter((item) => item.id !== runId));
+    } catch (error) {
+      setError(`无法删除历史研究：${getErrorMessage(error)}`);
+    } finally {
+      setDeletingRunId("");
+    }
+  }
+
   async function copyReport() {
     if (!finalReport) return;
     await navigator.clipboard.writeText(finalReport);
@@ -539,8 +932,8 @@ export default function App() {
             <ShieldCheck size={19} />
           </div>
           <div className="brand-text">
-            <strong>DeepResearch</strong>
-            <span>证据优先的研究工作台</span>
+            <strong>Deep Research Agent</strong>
+            <span>智能研究工作台</span>
           </div>
           <button className="icon-button" type="button" title="菜单" aria-label="菜单">
             <Menu size={18} />
@@ -562,44 +955,56 @@ export default function App() {
           }}
         >
           <Plus size={17} />
-          新建研究
+          新建任务
         </button>
 
         <label className="search-box">
           <Search size={15} />
-          <input type="search" placeholder="搜索对话、报告、来源" />
+          <input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="搜索历史研究" />
         </label>
 
-        <div className="section-label">当前会话</div>
+        <div className="section-label">历史研究</div>
         <div className="chat-list">
-          <button className="chat-item active" type="button">
-            <span className="chat-dot">
-              <FileText size={14} />
-            </span>
-            <span>
-              <strong>{conversationTitle}</strong>
-              <span>
-                {visibleEvents.length ? `${visibleEvents.length} 条研究事件` : "输入问题后开始研究"}
-              </span>
-            </span>
-            <span className="time">{formatShortTime(latestEvent?.created_at)}</span>
-          </button>
-          <button className="chat-item" type="button">
-            <span className="chat-dot">
-              <BarChart3 size={14} />
-            </span>
-            <span>
-              <strong>运行配置</strong>
-              <span>{config.searchApi} · 并行 {config.maxConcurrentResearchUnits}</span>
-            </span>
-            <span className="time">默认</span>
-          </button>
+          {filteredHistory.map((item) => (
+            <div
+              className={`chat-item ${run?.id === item.id ? "active" : ""}`}
+              key={item.id}
+            >
+              <button
+                className="chat-item-main"
+                type="button"
+                onClick={() => {
+                  sourceRef.current?.close();
+                  void refreshRun(item.id);
+                  if (item.status === "queued" || item.status === "running") attachEvents(item.id);
+                }}
+              >
+                <span className="chat-dot"><FileText size={14} /></span>
+                <span>
+                  <strong>{item.title || "未命名研究"}</strong>
+                  <span>{statusLabels[item.status]}</span>
+                </span>
+                <span className="time">{formatShortTime(item.updated_at)}</span>
+              </button>
+              <button
+                className="chat-delete"
+                type="button"
+                disabled={deletingRunId === item.id}
+                title="删除历史研究"
+                aria-label={`删除历史研究：${item.title || "未命名研究"}`}
+                onClick={() => void deleteHistoryRun(item.id, item.title)}
+              >
+                {deletingRunId === item.id ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
+              </button>
+            </div>
+          ))}
+          {!filteredHistory.length && <span className="paper-empty">暂无匹配的历史研究。</span>}
         </div>
 
         <section className="paper-library" aria-labelledby="paper-library-title">
           <div className="paper-library-head">
             <div>
-              <strong id="paper-library-title">私有论文库</strong>
+              <strong id="paper-library-title">论文库</strong>
               <span>{papers.length} 篇已入库</span>
             </div>
             <button
@@ -637,7 +1042,7 @@ export default function App() {
           <p className="paper-privacy">论文片段与检索问题会发送至阿里云百炼生成向量。</p>
         </section>
 
-        <div className="settings-panel side-settings">
+        <div className={`settings-panel side-settings ${configOpen ? "open" : ""}`}>
           <button className="settings-toggle" type="button" onClick={() => setConfigOpen((value) => !value)}>
             <Settings2 size={16} />
             运行配置
@@ -662,6 +1067,14 @@ export default function App() {
                   onChange={(event) => setConfig({ ...config, allowClarification: event.target.checked })}
                 />
                 允许开始前追问
+              </label>
+              <label className="checkbox-line">
+                <input
+                  type="checkbox"
+                  checked={config.reuseHistoricalResearch}
+                  onChange={(event) => setConfig({ ...config, reuseHistoricalResearch: event.target.checked })}
+                />
+                复用历史研究成果
               </label>
               <label>
                 Research model
@@ -804,22 +1217,44 @@ export default function App() {
                       <div className="research-card">
                         <header>
                           <strong>研究进度</strong>
-                          <span className={`pill ${isBusy ? "good" : ""}`}>{statusLabels[runStatus]}</span>
+                          <span className={`pill ${isBusy ? "good" : ""}`}>{progress}%</span>
                         </header>
-                        <ul className="step-list">
-                          {visibleEvents.map((event) => (
-                            <li key={event.id}>
-                              <span className={`status-dot ${event.type.includes("failed") ? "danger" : ""}`}>
-                                {eventIcon(event.type)}
-                              </span>
-                              <span>
-                                <b>{event.title}</b>
-                                {getEventText(event) && <small>{getEventText(event)}</small>}
-                              </span>
-                              <span className="time">{formatTime(event.created_at)}</span>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="stage-stack">
+                          {stages.map((stage, index) => {
+                            const definition = stageDefinitions[index];
+                            const related = events.filter((event) =>
+                              [...definition.active, ...definition.done].includes(event.type),
+                            );
+                            const expanded = expandedStages.has(index);
+                            return (
+                              <div className={`stage-row ${stage.state}`} key={stage.title}>
+                                <button type="button" onClick={() => setExpandedStages((current) => {
+                                  const next = new Set(current);
+                                  next.has(index) ? next.delete(index) : next.add(index);
+                                  return next;
+                                })}>
+                                  <span className="stage-number">
+                                    {stage.state === "completed" ? <CheckCircle2 size={17} /> : stage.state === "running" ? <Loader2 className="spin" size={17} /> : index + 1}
+                                  </span>
+                                  <span><b>{stage.title}</b><small>{stage.description}</small></span>
+                                  <time>{formatShortTime(related[related.length - 1]?.created_at)}</time>
+                                  {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </button>
+                                {expanded && related.length > 0 && (
+                                  <ul className="step-list">
+                                    {related.slice(-6).map((event) => (
+                                      <li key={event.id}>
+                                        <span className={`status-dot ${event.type.includes("failed") ? "danger" : ""}`}>{eventIcon(event.type)}</span>
+                                        <span><b>{event.title}</b>{getEventText(event) && <small>{getEventText(event)}</small>}</span>
+                                        <span className="time">{formatTime(event.created_at)}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
 
@@ -865,8 +1300,25 @@ export default function App() {
                           </div>
                         </header>
                         <div className="report-body">
-                          <ReactMarkdown>{finalReport}</ReactMarkdown>
+                          <MarkdownContent>{finalReport}</MarkdownContent>
                         </div>
+                      </div>
+                    )}
+
+                    {latestFollowUp && (
+                      <div className="event-detail">
+                        <div className="event-title-row"><h3>追问回答</h3></div>
+                        <MarkdownContent>{latestFollowUp}</MarkdownContent>
+                      </div>
+                    )}
+
+                    {run?.status === "interrupted" && (
+                      <div className="clarification-box">
+                        <strong>研究任务已中断</strong>
+                        <p>该任务不会自动恢复。手动恢复会优先从最近的研究检查点继续。</p>
+                        <button className="action-button primary" type="button" onClick={retryRun}>
+                          继续恢复
+                        </button>
                       </div>
                     )}
 
@@ -890,9 +1342,9 @@ export default function App() {
                     <div className="actions">
                       <button className="action-button primary" type="button" disabled={!finalReport} onClick={downloadReport}>
                         <FileText size={16} />
-                        导出报告
+                        下载报告
                       </button>
-                      <button className="action-button" type="button" disabled={!isBusy} onClick={cancelRun}>
+                      <button className="action-button" type="button" disabled={!canCancel} onClick={cancelRun}>
                         <Square size={16} />
                         停止研究
                       </button>
@@ -905,7 +1357,7 @@ export default function App() {
         </div>
 
         <div className="composer-wrap">
-          <form className="composer" onSubmit={startRun}>
+          <form className="composer" onSubmit={run?.status === "completed" ? sendFollowUp : startRun}>
             <div className="mode-strip" role="tablist" aria-label="研究模式">
               <button type="button" className="mode active">
                 <Search size={14} />
@@ -927,12 +1379,17 @@ export default function App() {
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="输入研究问题，或粘贴资料让助手归纳、核验、追踪来源..."
+              placeholder={run?.status === "completed" ? "继续追问；涉及最新信息时会自动启动补充研究..." : "输入研究问题，或粘贴资料让助手归纳、核验、追踪来源..."}
             />
             <div className="composer-bottom">
               <div className="composer-tools">
-                <button className="icon-button" type="button" title="上传资料" aria-label="上传资料">
+                <button className="icon-button" type="button" title="上传论文" aria-label="上传论文" onClick={() => paperInputRef.current?.click()}>
                   <Plus size={17} />
+                </button>
+                <button className={`model-config-button ${configOpen ? "active" : ""}`} type="button" onClick={() => setConfigOpen((value) => !value)}>
+                  <Settings2 size={15} />
+                  模型配置
+                  <ChevronDown size={14} />
                 </button>
                 <button className="icon-button" type="button" title="添加网页来源" aria-label="添加网页来源">
                   <Link size={17} />
@@ -950,77 +1407,37 @@ export default function App() {
         </div>
       </section>
 
-      <aside className="inspector" aria-label="证据与任务">
-        <div className="inspector-top">
-          <div className="inspector-title">
-            <strong>证据面板</strong>
-            <span>事件、来源与输出状态</span>
-          </div>
-          <button className="icon-button" type="button" title="筛选来源" aria-label="筛选来源">
-            <Filter size={17} />
-          </button>
-        </div>
-
+      <aside className="inspector" aria-label="计划与运行状态">
         <div className="inspector-scroll">
-          <section className="panel-block">
-            <div className="panel-head">
-              <strong>关键来源</strong>
-              <span className="pill">{sourceEvents.length}</span>
-            </div>
-            <div className="panel-body">
-              {sourceEvents.length === 0 && <div className="empty-mini">搜索或工具调用会显示在这里。</div>}
-              {sourceEvents.map((event, index) => (
-                <div className="source" key={event.id}>
-                  <span>
-                    <strong>{event.title}</strong>
-                    <span>{getEventText(event) || event.type}</span>
-                  </span>
-                  <span className="source-score">{Math.max(62, 92 - index * 5)}</span>
-                </div>
-              ))}
-            </div>
-          </section>
+          {(submittedPrompt || run || events.length > 0) && (
+            <section className="panel-block plan-panel">
+              <div className="panel-head">
+                <strong><Brain size={16} />计划</strong>
+                <ChevronUp size={16} />
+              </div>
+              <ol className="plan-list">
+                {stages.map((stage, index) => (
+                  <li className={stage.state} key={stage.title}>
+                    <span>{stage.state === "completed" ? <CheckCircle2 size={15} /> : index + 1}</span>
+                    <div><strong>{stage.title}</strong><small>{stage.state === "completed" ? "已完成" : stage.state === "running" ? "进行中" : stage.state === "failed" ? "失败" : "等待中"}</small></div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
 
-          <section className="panel-block">
+          <section className="panel-block runtime-panel">
             <div className="panel-head">
-              <strong>研究任务</strong>
-              <span className={`pill ${completedEvents.length ? "good" : ""}`}>
-                {completedEvents.length}/{Math.max(visibleEvents.length, 1)}
-              </span>
+              <strong><ShieldCheck size={16} />运行状态</strong>
+              <ChevronUp size={16} />
             </div>
-            <div className="panel-body">
-              {visibleEvents.length === 0 && <div className="empty-mini">提交问题后会同步任务进度。</div>}
-              {visibleEvents.slice(-6).map((event) => (
-                <div className={`task ${event.type.includes("completed") || event.type.includes("created") ? "done" : ""}`} key={`task-${event.id}`}>
-                  <span className="task-icon">{eventIcon(event.type)}</span>
-                  <span>
-                    <strong>{event.title}</strong>
-                    <span>{getEventText(event) || formatTime(event.created_at)}</span>
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="note">右侧面板把研究过程和证据线索拆出来，长报告生成时也能快速扫描当前状态。</div>
-          </section>
-
-          <section className="panel-block">
-            <div className="panel-head">
-              <strong>输出格式</strong>
-              <span className="pill">Markdown</span>
-            </div>
-            <div className="panel-body output-actions">
-              <button className="action-button primary" type="button" disabled={!finalReport} onClick={downloadReport}>
-                <FileText size={16} />
-                完整报告
-              </button>
-              <button className="action-button" type="button" disabled={!finalReport} onClick={copyReport}>
-                <Clipboard size={16} />
-                复制 Markdown
-              </button>
-              <button className="action-button" type="button" disabled={!isBusy} onClick={cancelRun}>
-                <Square size={16} />
-                停止当前任务
-              </button>
+            <div className="runtime-body">
+              <div><span>当前阶段</span><strong className="current-stage">{currentStage?.title || statusLabels[runStatus]}</strong></div>
+              <div className="progress-line"><span>总体进度</span><i><b style={{ width: `${progress}%` }} /></i><strong>{progress}%</strong></div>
+              <div><span>活跃 Agent</span><strong>{agents.filter((agent) => agent.state === "running").length} / {agents.length}</strong></div>
+              <div><span>已用时间</span><strong>{elapsedLabel}</strong></div>
+              {canCancel && <button className="action-button" type="button" onClick={cancelRun}><Square size={14} />停止研究</button>}
+              <p>研究过程中，可随时查看任务进度或停止当前任务。</p>
             </div>
           </section>
         </div>

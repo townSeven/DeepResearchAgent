@@ -6,10 +6,16 @@ These are the messages that have been exchanged so far from the user asking for 
 {messages}
 </Messages>
 
+The system performed the following private-paper search before this clarification decision:
+<PrivatePaperSearch>
+{private_paper_context}
+</PrivatePaperSearch>
+
 Today's date is {date}.
 
 Assess whether you need to ask a clarifying question, or if the user has already provided enough information for you to start research.
 IMPORTANT: If you can see in the messages history that you have already asked a clarifying question, you almost always do not need to ask another one. Only ask another question if ABSOLUTELY NECESSARY.
+Use the private-paper search results to resolve paper titles, acronyms, and other details when possible. Do not claim that you searched, found, or read private papers beyond what is explicitly present in <PrivatePaperSearch>.
 
 The language you use for your response should be consistent with that of the user.
 If there are acronyms, abbreviations, or unknown terms, ask the user to clarify.

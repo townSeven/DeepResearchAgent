@@ -11,6 +11,9 @@ def test_private_paper_configuration_defaults():
     assert configuration.paper_chunk_size == 1200
     assert configuration.paper_chunk_overlap == 200
     assert configuration.max_paper_size_mb == 25
+    assert configuration.research_database_path == ".knowledge/research.sqlite"
+    assert configuration.checkpoint_database_path == ".knowledge/checkpoints.sqlite"
+    assert configuration.research_history_enabled is False
 
 
 def test_private_paper_configuration_can_be_overridden():

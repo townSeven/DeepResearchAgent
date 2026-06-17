@@ -1097,9 +1097,14 @@ def get_minimax_mcp_server_config(config: RunnableConfig) -> dict[str, Any]:
         "env": env,
     }
 
+def remove_thinking_tags(text: Any) -> str:
+    """Remove provider-injected thinking blocks while preserving surrounding whitespace."""
+    return re.sub(r"<think>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL)
+
+
 def strip_thinking_tags(text: Any) -> str:
     """Remove provider-injected thinking blocks from user-visible text."""
-    return re.sub(r"<think>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL).strip()
+    return remove_thinking_tags(text).strip()
 
 def _extract_json_object(text: str) -> Any:
     """Extract a JSON object from model output that may include thinking or fences."""

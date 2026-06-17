@@ -147,6 +147,12 @@ class Configuration(BaseModel):
     paper_chunk_size: int = Field(default=1200, ge=100)
     paper_chunk_overlap: int = Field(default=200, ge=0)
     max_paper_size_mb: int = Field(default=25, ge=1)
+    # Persistent research history
+    research_database_path: str = ".knowledge/research.sqlite"
+    checkpoint_database_path: str = ".knowledge/checkpoints.sqlite"
+    research_history_enabled: bool = False
+    research_history_path: str = ".knowledge/research_artifacts"
+    research_history_top_k: int = Field(default=5, ge=1, le=20)
     # Model Configuration
     summarization_model: str = Field(
         default="deepseek:deepseek-v4-flash",

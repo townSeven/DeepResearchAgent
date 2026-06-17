@@ -19,7 +19,12 @@ from langgraph.types import Command
 from deep_research_agent.configuration import (
     Configuration,
 )
-from deep_research_agent.events import emit_progress, emit_ui_progress, get_ui_language, ui_text
+from deep_research_agent.events import (
+    emit_progress,
+    emit_ui_progress,
+    get_ui_language,
+    ui_text,
+)
 from deep_research_agent.prompts import (
     clarify_with_user_instructions,
     compress_research_simple_human_message,
@@ -49,9 +54,11 @@ from deep_research_agent.utils import (
     get_model_name_for_init,
     get_model_token_limit,
     get_notes_from_tool_calls,
+    get_private_paper_search_tool,
     get_today_str,
     is_token_limit_exceeded,
     openai_websearch_called,
+    remove_thinking_tags,
     remove_up_to_last_ai_message,
     strip_thinking_tags,
     think_tool,
@@ -129,6 +136,29 @@ def _language_instruction() -> str:
         "URLs, code identifiers, model names, or source titles that should remain unchanged."
     )
 
+
+async def _get_clarification_private_context(
+    messages: list,
+    configurable: Configuration,
+) -> str:
+    """Search private papers before deciding whether clarification is required."""
+    if not configurable.private_papers_enabled:
+        return "Private-paper search is disabled."
+
+    private_paper_tool = get_private_paper_search_tool(configurable)
+    if private_paper_tool is None:
+        return "Private-paper search is unavailable because embedding credentials are missing."
+
+    human_messages = filter_messages(messages, include_types=["human"])
+    query = get_buffer_string(human_messages).strip()
+    if not query:
+        return "Private-paper search was not run because the user query is empty."
+
+    return await private_paper_tool.ainvoke(
+        {"query": query, "top_k": configurable.private_papers_top_k}
+    )
+
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
@@ -181,9 +211,14 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     )
     
     # Step 3: Analyze whether clarification is needed
+    private_paper_context = await _get_clarification_private_context(
+        messages,
+        configurable,
+    )
     prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(messages), 
-        date=get_today_str()
+        messages=get_buffer_string(messages),
+        private_paper_context=private_paper_context,
+        date=get_today_str(),
     ) + "\n\n" + _language_instruction()
     response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
     
@@ -1001,7 +1036,7 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                     "final_report_delta",
                     ui_text("writing_final_report_title"),
                     None,
-                    {"delta": strip_thinking_tags(chunk_text)},
+                    {"delta": remove_thinking_tags(chunk_text)},
                 )
             
             # Return successful report generation
